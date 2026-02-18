@@ -27,6 +27,7 @@ import {
 	createToolApi,
 	updateToolApi,
 	deleteToolApi,
+	fetchChatMemoryUsageApi,
 } from './chat.api';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import {
@@ -56,6 +57,7 @@ import {
 	type ChatHubExecutionBegin,
 	type ChatHubExecutionEnd,
 	type ChatMessageContentChunk,
+	type ChatMemorySizeResult,
 } from '@n8n/api-types';
 import type {
 	CredentialsMap,
@@ -103,6 +105,9 @@ export const useChatStore = defineStore(STORES.CHAT_HUB, () => {
 	const settings = ref<Record<ChatHubLLMProvider, ChatProviderSettingsDto> | null>(null);
 	const configuredTools = ref<ChatHubToolDto[]>([]);
 	const configuredToolsLoaded = ref(false);
+
+	const memoryUsage = ref<ChatMemorySizeResult | null>(null);
+	const memoryUsageLoading = ref(false);
 
 	const conversationsBySession = ref<Map<ChatSessionId, ChatConversation>>(new Map());
 
@@ -308,6 +313,16 @@ export const useChatStore = defineStore(STORES.CHAT_HUB, () => {
 		configuredTools.value = tools;
 		configuredToolsLoaded.value = true;
 		return tools;
+	}
+
+	async function fetchMemoryUsage() {
+		try {
+			memoryUsageLoading.value = true;
+			memoryUsage.value = await fetchChatMemoryUsageApi(rootStore.restApiContext);
+		} finally {
+			memoryUsageLoading.value = false;
+		}
+		return memoryUsage.value;
 	}
 
 	async function addConfiguredTool(tool: INode): Promise<ChatHubToolDto> {
@@ -1254,6 +1269,13 @@ export const useChatStore = defineStore(STORES.CHAT_HUB, () => {
 		updateConfiguredTool,
 		toggleToolEnabled,
 		removeConfiguredTool,
+
+		/**
+		 * memory usage
+		 */
+		memoryUsage,
+		memoryUsageLoading,
+		fetchMemoryUsage,
 
 		/**
 		 * conversations

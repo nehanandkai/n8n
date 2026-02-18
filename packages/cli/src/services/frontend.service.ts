@@ -258,6 +258,9 @@ export class FrontendService {
 			dataTables: {
 				maxSize: this.globalConfig.dataTable.maxSize,
 			},
+			chatMemory: {
+				maxSize: this.globalConfig.chatHub.chatMemoryMaxSize,
+			},
 			publicApi: {
 				enabled: isApiEnabled(),
 				latestVersion: 1,
