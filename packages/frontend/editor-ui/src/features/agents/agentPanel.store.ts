@@ -30,6 +30,8 @@ export const useAgentPanelStore = defineStore('agentPanel', () => {
 	const rootStore = useRootStore();
 	const agentsStore = useAgentsStore();
 
+	const llmConfigured = computed(() => capabilities.value?.llmConfigured ?? false);
+
 	const selectedAgent = computed(() => {
 		if (!panelAgentId.value) return null;
 		return agentsStore.agents.find((a) => a.id === panelAgentId.value) ?? null;
@@ -197,7 +199,6 @@ export const useAgentPanelStore = defineStore('agentPanel', () => {
 
 	const dispatchTask = async (
 		prompt: string,
-		keys?: { llmApiKey?: string },
 		externalAgents?: Array<{ url: string; apiKey?: string }>,
 	) => {
 		if (!panelAgentId.value) return;
@@ -214,9 +215,6 @@ export const useAgentPanelStore = defineStore('agentPanel', () => {
 		abortController = new AbortController();
 
 		const body: Record<string, unknown> = { prompt };
-		if (keys?.llmApiKey) {
-			body.keys = { llmApiKey: keys.llmApiKey };
-		}
 		if (externalAgents?.length) {
 			body.externalAgents = externalAgents;
 		}
@@ -314,6 +312,7 @@ export const useAgentPanelStore = defineStore('agentPanel', () => {
 		isLoading,
 		taskResult,
 		isSubmitting,
+		llmConfigured,
 		streamingSteps,
 		streamingSummary,
 		isStreaming,

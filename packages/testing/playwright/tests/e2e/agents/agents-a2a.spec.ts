@@ -1,9 +1,7 @@
 import type { APIResponse } from '@playwright/test';
 import { nanoid } from 'nanoid';
 
-import { test, expect, agentTestConfig } from './fixtures';
-
-test.use(agentTestConfig);
+import { test, expect } from './fixtures';
 
 /**
  * Server-internal URL for external agent delegation.
@@ -91,7 +89,7 @@ test.describe('Agent Card (A2A compliance)', () => {
 		// Interfaces — must point to the task endpoint
 		expect(card.interfaces).toHaveLength(1);
 		expect(card.interfaces[0].type).toBe('http+json');
-		expect(card.interfaces[0].url).toContain(`/rest/agents/${agent.id}/task`);
+		expect(card.interfaces[0].url).toContain(`/api/v1/agents/${agent.id}/task`);
 
 		// Security schemes
 		expect(card.securitySchemes.apiKey).toEqual({
@@ -305,6 +303,7 @@ test.describe('Agent Task Streaming', () => {
 			data: {
 				prompt: `Execute the workflow named "${workflowName}" and report the result.`,
 			},
+			timeout: 120_000,
 		});
 
 		expect(response.ok()).toBe(true);
@@ -391,6 +390,7 @@ test.describe('Agent Task Execution', () => {
 			data: {
 				prompt: `Execute the workflow named "${workflowName}" and report the result.`,
 			},
+			timeout: 120_000,
 		});
 
 		expect(response.ok()).toBe(true);
@@ -428,273 +428,12 @@ test.describe('Agent Task Execution', () => {
 		const task = await unwrap<{ status: string; message: string }>(response);
 
 		expect(task.status).toBe('error');
-		expect(task.message).toContain('No LLM API key available. Provide keys.llm');
+		expect(task.message).toContain('No LLM API key available.');
 	});
 });
 
-test.describe('BYOK/BYOC (Bring Your Own Keys)', () => {
-	test('should execute task using caller-provided LLM key via keys.llm', async ({
-		agent,
-		agentProject,
-		agentLlmApiKey,
-		api,
-		externalRequest,
-	}) => {
-		test.skip(!agentLlmApiKey, 'N8N_AGENT_LLM_API_KEY not set — skipping LLM tests');
-		test.setTimeout(180_000);
-
-		await api.projects.addUserToProject(agentProject.id, agent.id, 'project:editor');
-
-		const workflowName = `BYOK E2E Workflow ${nanoid(8)}`;
-		const workflow = await api.workflows.createWorkflow({
-			name: workflowName,
-			nodes: [
-				{
-					id: nanoid(),
-					name: 'When clicking "Test workflow"',
-					type: 'n8n-nodes-base.manualTrigger',
-					typeVersion: 1,
-					position: [250, 300],
-					parameters: {},
-				},
-				{
-					id: nanoid(),
-					name: 'Set',
-					type: 'n8n-nodes-base.set',
-					typeVersion: 3.4,
-					position: [450, 300],
-					parameters: {
-						assignments: {
-							assignments: [
-								{
-									id: nanoid(),
-									name: 'result',
-									value: 'BYOK result',
-									type: 'string',
-								},
-							],
-						},
-					},
-				},
-			],
-			connections: {
-				'When clicking "Test workflow"': {
-					main: [[{ node: 'Set', type: 'main', index: 0 }]],
-				},
-			},
-		});
-
-		await api.workflows.transfer(workflow.id, agentProject.id);
-
-		const response = await externalRequest.post(`/rest/agents/${agent.id}/task`, {
-			data: {
-				prompt: `Execute the workflow named "${workflowName}" and report the result.`,
-				keys: { llm: agentLlmApiKey },
-			},
-		});
-
-		expect(response.ok()).toBe(true);
-
-		const task = await unwrap<{
-			status: string;
-			summary: string;
-			steps: Array<{ action: string; workflowName?: string; result?: string }>;
-		}>(response);
-
-		expect(task.status).toBe('completed');
-		expect(task.steps.length).toBeGreaterThan(0);
-
-		const executionStep = task.steps.find((s) => s.action === 'execute_workflow');
-		expect(executionStep).toBeTruthy();
-		expect(executionStep!.workflowName).toBe(workflowName);
-	});
-
-	test('should stream SSE events using caller-provided keys', async ({
-		agent,
-		agentProject,
-		agentLlmApiKey,
-		api,
-		backendUrl,
-		ownerApiKey,
-	}) => {
-		test.skip(!agentLlmApiKey, 'N8N_AGENT_LLM_API_KEY not set — skipping LLM tests');
-		test.setTimeout(180_000);
-
-		await api.projects.addUserToProject(agentProject.id, agent.id, 'project:editor');
-
-		const workflowName = `BYOK Stream Workflow ${nanoid(8)}`;
-		const workflow = await api.workflows.createWorkflow({
-			name: workflowName,
-			nodes: [
-				{
-					id: nanoid(),
-					name: 'When clicking "Test workflow"',
-					type: 'n8n-nodes-base.manualTrigger',
-					typeVersion: 1,
-					position: [250, 300],
-					parameters: {},
-				},
-				{
-					id: nanoid(),
-					name: 'Set',
-					type: 'n8n-nodes-base.set',
-					typeVersion: 3.4,
-					position: [450, 300],
-					parameters: {
-						assignments: {
-							assignments: [
-								{
-									id: nanoid(),
-									name: 'result',
-									value: 'BYOK streamed',
-									type: 'string',
-								},
-							],
-						},
-					},
-				},
-			],
-			connections: {
-				'When clicking "Test workflow"': {
-					main: [[{ node: 'Set', type: 'main', index: 0 }]],
-				},
-			},
-		});
-
-		await api.workflows.transfer(workflow.id, agentProject.id);
-
-		const response = await fetch(`${backendUrl}/rest/agents/${agent.id}/task`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				Accept: 'text/event-stream',
-				'x-n8n-api-key': ownerApiKey.rawApiKey,
-			},
-			body: JSON.stringify({
-				prompt: `Execute the workflow named "${workflowName}" and report the result.`,
-				keys: { llm: agentLlmApiKey },
-			}),
-		});
-
-		expect(response.ok).toBe(true);
-		expect(response.headers.get('content-type')).toContain('text/event-stream');
-
-		const body = await response.text();
-		const events = parseSseEvents(body);
-
-		expect(events.length).toBeGreaterThanOrEqual(3);
-		expect(events[0].type).toBe('step');
-
-		const doneEvent = events[events.length - 1];
-		expect(doneEvent.type).toBe('done');
-		expect(doneEvent.status).toBe('completed');
-	});
-
-	test('should reject task with invalid keys.llm', async ({ agent, externalRequest }) => {
-		const response = await externalRequest.post(`/rest/agents/${agent.id}/task`, {
-			data: {
-				prompt: 'Hello',
-				keys: { llm: 'sk-invalid-key-that-should-fail' },
-			},
-		});
-
-		expect(response.status()).toBe(500);
-	});
-
-	test('should pass BYOC keys through to workflow and call external API', async ({
-		agent,
-		agentProject,
-		agentLlmApiKey,
-		testCredentials,
-		api,
-		externalRequest,
-	}) => {
-		test.skip(!agentLlmApiKey, 'N8N_AGENT_LLM_API_KEY not set — skipping LLM tests');
-		test.skip(!testCredentials.currents, 'TEST_CREDENTIAL_CURRENTS not set — skipping BYOC test');
-		test.setTimeout(180_000);
-
-		await api.projects.addUserToProject(agentProject.id, agent.id, 'project:editor');
-
-		// Workflow: Manual Trigger → HTTP Request (Currents API) using keys.currents
-		const workflowName = `BYOC Currents Workflow ${nanoid(8)}`;
-		const workflow = await api.workflows.createWorkflow({
-			name: workflowName,
-			nodes: [
-				{
-					id: nanoid(),
-					name: 'When clicking "Test workflow"',
-					type: 'n8n-nodes-base.manualTrigger',
-					typeVersion: 1,
-					position: [250, 300],
-					parameters: {},
-				},
-				{
-					id: nanoid(),
-					name: 'Get Currents Projects',
-					type: 'n8n-nodes-base.httpRequest',
-					typeVersion: 4.2,
-					position: [450, 300],
-					parameters: {
-						url: 'https://api.currents.dev/v1/projects',
-						method: 'GET',
-						sendQuery: true,
-						queryParameters: {
-							parameters: [{ name: 'limit', value: '1' }],
-						},
-						sendHeaders: true,
-						headerParameters: {
-							parameters: [
-								{
-									name: 'Authorization',
-									value: '=Bearer {{ $json.keys.currents }}',
-								},
-							],
-						},
-					},
-				},
-			],
-			connections: {
-				'When clicking "Test workflow"': {
-					main: [[{ node: 'Get Currents Projects', type: 'main', index: 0 }]],
-				},
-			},
-		});
-
-		await api.workflows.transfer(workflow.id, agentProject.id);
-
-		const response = await externalRequest.post(`/rest/agents/${agent.id}/task`, {
-			data: {
-				prompt: `Execute the workflow named "${workflowName}" and report the result.`,
-				keys: { llm: agentLlmApiKey, currents: testCredentials.currents },
-			},
-		});
-
-		expect(response.ok()).toBe(true);
-
-		const task = await unwrap<{
-			status: string;
-			summary: string;
-			steps: Array<{ action: string; workflowName?: string; result?: string }>;
-		}>(response);
-
-		// eslint-disable-next-line no-console
-		console.log('\n--- BYOC Task Result ---');
-		// eslint-disable-next-line no-console
-		console.log(`  Status: ${task.status}`);
-		// eslint-disable-next-line no-console
-		console.log(`  Summary: ${task.summary}`);
-		// eslint-disable-next-line no-console
-		console.log('--- End BYOC ---\n');
-
-		expect(task.status).toBe('completed');
-
-		const executionStep = task.steps.find((s) => s.action === 'execute_workflow');
-		expect(executionStep).toBeTruthy();
-		expect(executionStep!.result).toBe('success');
-	});
-});
-
-test.describe('Agent Cross-Instance Delegation', () => {
+// FIXME: Cross-instance delegation tests require container networking (localhost:5678)
+test.describe.skip('Agent Cross-Instance Delegation', () => {
 	test('should delegate to external agent via HTTP', async ({
 		agent: agentA,
 		agentProject,
@@ -772,6 +511,7 @@ test.describe('Agent Cross-Instance Delegation', () => {
 					},
 				],
 			},
+			timeout: 120_000,
 		});
 
 		expect(response.ok()).toBe(true);
@@ -917,5 +657,192 @@ test.describe('Agent Cross-Instance Delegation', () => {
 		const doneEvent = events[events.length - 1];
 		expect(doneEvent.type).toBe('done');
 		expect(doneEvent.status).toBe('completed');
+	});
+});
+
+test.describe('Public API Endpoints (/api/v1/)', () => {
+	test('should return A2A card via GET /api/v1/agents/:id/card', async ({
+		agent,
+		api,
+		ownerApiKey,
+	}) => {
+		const card = await api.agents.getCardViaPublicApi(agent.id, ownerApiKey.rawApiKey);
+
+		expect(card.id).toBe(agent.id);
+		expect(card.name).toBe(agent.firstName);
+		expect(card.provider.name).toBe('n8n');
+		expect(card.interfaces).toHaveLength(1);
+		expect(card.interfaces[0].type).toBe('http+json');
+		expect(card.interfaces[0].url).toContain('/api/v1/agents/');
+		expect(card.interfaces[0].url).toContain('/task');
+	});
+
+	test('should return error for non-existent agent card via public API', async ({
+		api,
+		ownerApiKey,
+	}) => {
+		const response = await api.agents.getCardViaPublicApiRaw(
+			'non-existent-id',
+			ownerApiKey.rawApiKey,
+		);
+
+		// Public API may return 400 (invalid ID format) or 404 (not found)
+		expect(response.ok()).toBe(false);
+	});
+
+	test('should execute task via POST /api/v1/agents/:id/task and get JSON result', async ({
+		agent,
+		agentProject,
+		agentLlmApiKey,
+		api,
+		ownerApiKey,
+	}) => {
+		test.skip(!agentLlmApiKey, 'N8N_AGENT_LLM_API_KEY not set — skipping LLM tests');
+		test.setTimeout(180_000);
+
+		await api.projects.addUserToProject(agentProject.id, agent.id, 'project:editor');
+
+		const workflowName = `PublicAPI E2E Workflow ${nanoid(8)}`;
+		const workflow = await api.workflows.createWorkflow({
+			name: workflowName,
+			nodes: [
+				{
+					id: nanoid(),
+					name: 'When clicking "Test workflow"',
+					type: 'n8n-nodes-base.manualTrigger',
+					typeVersion: 1,
+					position: [250, 300],
+					parameters: {},
+				},
+				{
+					id: nanoid(),
+					name: 'Set',
+					type: 'n8n-nodes-base.set',
+					typeVersion: 3.4,
+					position: [450, 300],
+					parameters: {
+						assignments: {
+							assignments: [
+								{
+									id: nanoid(),
+									name: 'result',
+									value: 'Public API result',
+									type: 'string',
+								},
+							],
+						},
+					},
+				},
+			],
+			connections: {
+				'When clicking "Test workflow"': {
+					main: [[{ node: 'Set', type: 'main', index: 0 }]],
+				},
+			},
+		});
+
+		await api.workflows.transfer(workflow.id, agentProject.id);
+
+		const task = await api.agents.dispatchTaskViaPublicApi(
+			agent.id,
+			`Execute the workflow named "${workflowName}" and report the result.`,
+			ownerApiKey.rawApiKey,
+		);
+
+		expect(task.status).toBe('completed');
+		expect(task).toHaveProperty('steps');
+		expect(task).toHaveProperty('summary');
+	});
+
+	test('should stream SSE via POST /api/v1/agents/:id/task with Accept header', async ({
+		agent,
+		agentProject,
+		agentLlmApiKey,
+		api,
+		backendUrl,
+		ownerApiKey,
+	}) => {
+		test.skip(!agentLlmApiKey, 'N8N_AGENT_LLM_API_KEY not set — skipping LLM tests');
+		test.setTimeout(180_000);
+
+		await api.projects.addUserToProject(agentProject.id, agent.id, 'project:editor');
+
+		const workflowName = `PublicAPI SSE Workflow ${nanoid(8)}`;
+		const workflow = await api.workflows.createWorkflow({
+			name: workflowName,
+			nodes: [
+				{
+					id: nanoid(),
+					name: 'When clicking "Test workflow"',
+					type: 'n8n-nodes-base.manualTrigger',
+					typeVersion: 1,
+					position: [250, 300],
+					parameters: {},
+				},
+				{
+					id: nanoid(),
+					name: 'Set',
+					type: 'n8n-nodes-base.set',
+					typeVersion: 3.4,
+					position: [450, 300],
+					parameters: {
+						assignments: {
+							assignments: [
+								{
+									id: nanoid(),
+									name: 'result',
+									value: 'Public SSE result',
+									type: 'string',
+								},
+							],
+						},
+					},
+				},
+			],
+			connections: {
+				'When clicking "Test workflow"': {
+					main: [[{ node: 'Set', type: 'main', index: 0 }]],
+				},
+			},
+		});
+
+		await api.workflows.transfer(workflow.id, agentProject.id);
+
+		const response = await fetch(`${backendUrl}/api/v1/agents/${agent.id}/task`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'text/event-stream',
+				'x-n8n-api-key': ownerApiKey.rawApiKey,
+			},
+			body: JSON.stringify({
+				prompt: `Execute the workflow named "${workflowName}" and report the result.`,
+			}),
+		});
+
+		expect(response.ok).toBe(true);
+		expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+		const body = await response.text();
+		const events = parseSseEvents(body);
+
+		expect(events.length).toBeGreaterThanOrEqual(3);
+		expect(events[0].type).toBe('step');
+
+		const doneEvent = events[events.length - 1];
+		expect(doneEvent.type).toBe('done');
+		expect(doneEvent.status).toBe('completed');
+	});
+
+	test('should have card interfaces URL pointing to /api/v1/', async ({
+		agent,
+		api,
+		ownerApiKey,
+	}) => {
+		const card = await api.agents.getCardViaPublicApi(agent.id, ownerApiKey.rawApiKey);
+
+		// The card URL should point to the public API, not /rest/
+		expect(card.interfaces[0].url).toContain('/api/v1/');
+		expect(card.interfaces[0].url).not.toContain('/rest/');
 	});
 });

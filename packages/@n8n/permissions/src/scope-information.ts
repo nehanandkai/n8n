@@ -23,7 +23,7 @@ export const ALL_SCOPES = buildResourceScopes();
 
 export const ALL_API_KEY_SCOPES = buildApiKeyScopes();
 
-export const scopeInformation: Partial<Record<Scope, ScopeInformation>> = {
+export const scopeInformation: Partial<Record<Scope | ApiKeyScope, ScopeInformation>> = {
 	'aiAssistant:manage': {
 		displayName: 'Manage AI Usage',
 		description: 'Allows managing AI Usage settings.',
@@ -39,5 +39,13 @@ export const scopeInformation: Partial<Record<Scope, ScopeInformation>> = {
 	'workflow:unpublish': {
 		displayName: 'Unpublish Workflow',
 		description: 'Allows unpublishing workflows.',
+	},
+	'agent:read': {
+		displayName: 'Read Agent Card',
+		description: 'Allows reading agent cards for A2A discovery.',
+	},
+	'agent:execute': {
+		displayName: 'Execute Agent Task',
+		description: 'Allows dispatching tasks to agents.',
 	},
 };

@@ -1,262 +1,83 @@
-import type { User } from '@n8n/db';
-import type {
-	UserRepository,
-	WorkflowRepository,
-	ProjectRelationRepository,
-	ProjectRepository,
-} from '@n8n/db';
+import type { AuthenticatedRequest } from '@n8n/db';
 import { mock } from 'jest-mock-extended';
 import type { Request, Response } from 'express';
 
-import {
-	AgentsController,
-	buildSystemPrompt,
-	callExternalAgent,
-	type ExternalAgentConfig,
-} from '../agents.controller';
+import { AgentsController } from '../agents.controller';
 
-import type { ActiveExecutions } from '@/active-executions';
-import type { CredentialsService } from '@/credentials/credentials.service';
-import type { WorkflowRunner } from '@/workflow-runner';
-import type { WorkflowFinderService } from '@/workflows/workflow-finder.service';
-import type { WorkflowSharingService } from '@/workflows/workflow-sharing.service';
+import type {
+	AgentsService,
+	ExternalAgentConfig,
+	AgentDto,
+	LlmConfig,
+} from '@/services/agents.service';
+import { buildSystemPrompt, callExternalAgent, callLlm } from '@/services/agents.service';
 
-function makeAgent(overrides: Partial<User> = {}): User {
-	return mock<User>({
+// Mock SSRF validation — unit tests don't resolve DNS
+jest.mock('@/agents/validate-agent-url', () => ({
+	validateExternalAgentUrl: jest.fn().mockResolvedValue(undefined),
+}));
+
+function makeAgentDto(overrides: Partial<AgentDto> = {}): AgentDto {
+	return {
 		id: 'agent-1',
 		firstName: 'TestAgent',
 		lastName: '',
 		email: 'agent-test@internal.n8n.local',
-		type: 'agent',
 		avatar: null,
 		description: null,
 		agentAccessLevel: 'open',
 		...overrides,
-	});
+	};
 }
 
 describe('AgentsController', () => {
-	const userRepository = mock<UserRepository>();
-	const workflowRepository = mock<WorkflowRepository>();
-	const workflowSharingService = mock<WorkflowSharingService>();
-	const credentialsService = mock<CredentialsService>();
-	const projectRelationRepository = mock<ProjectRelationRepository>();
-	const projectRepository = mock<ProjectRepository>();
-	const workflowFinderService = mock<WorkflowFinderService>();
-	const workflowRunner = mock<WorkflowRunner>();
-	const activeExecutions = mock<ActiveExecutions>();
-
+	const agentsService = mock<AgentsService>();
 	let controller: AgentsController;
 
 	beforeEach(() => {
 		jest.clearAllMocks();
-		controller = new AgentsController(
-			userRepository,
-			workflowRepository,
-			workflowSharingService,
-			credentialsService,
-			projectRelationRepository,
-			projectRepository,
-			workflowFinderService,
-			workflowRunner,
-			activeExecutions,
-		);
+		controller = new AgentsController(agentsService);
 	});
 
 	describe('getAgentCard', () => {
 		it('should return valid A2A agent card schema', async () => {
-			const agent = makeAgent({ description: 'Handles docs' });
-			userRepository.findOneBy.mockResolvedValue(agent);
+			const card = {
+				id: 'agent-1',
+				name: 'TestAgent',
+				provider: { name: 'n8n', description: 'Handles docs' },
+				capabilities: { streaming: true, pushNotifications: false, multiTurn: true },
+				skills: [],
+				interfaces: [{ type: 'http+json', url: 'https://example.com/api/v1/agents/agent-1/task' }],
+				securitySchemes: {
+					apiKey: { type: 'apiKey', name: 'x-n8n-api-key', in: 'header' },
+				},
+				security: [{ apiKey: [] }],
+			};
+			agentsService.getAgentCard.mockResolvedValue(card);
 
 			const req = mock<Request>({ protocol: 'https' });
 			req.get.mockReturnValue('example.com');
 
 			const result = await controller.getAgentCard(req, mock<Response>(), 'agent-1');
 
-			expect(result).toEqual({
-				id: 'agent-1',
-				name: 'TestAgent',
-				provider: { name: 'n8n', description: 'Handles docs' },
-				capabilities: {
-					streaming: true,
-					pushNotifications: false,
-					multiTurn: true,
-				},
-				skills: [],
-				interfaces: [
-					{
-						type: 'http+json',
-						url: 'https://example.com/rest/agents/agent-1/task',
-					},
-				],
-				securitySchemes: {
-					apiKey: {
-						type: 'apiKey',
-						name: 'x-n8n-api-key',
-						in: 'header',
-					},
-				},
-				security: [{ apiKey: [] }],
-			});
+			expect(agentsService.getAgentCard).toHaveBeenCalledWith('agent-1', 'https://example.com');
+			expect(result).toEqual(card);
 		});
 
-		it('should return 404 for non-existent agent', async () => {
-			userRepository.findOneBy.mockResolvedValue(null);
+		it('should propagate 404 for non-existent agent', async () => {
+			agentsService.getAgentCard.mockRejectedValue(new Error('Agent nonexistent not found'));
 
 			const req = mock<Request>();
 			await expect(controller.getAgentCard(req, mock<Response>(), 'nonexistent')).rejects.toThrow(
 				'Agent nonexistent not found',
 			);
 		});
-
-		it('should return 404 for closed agent', async () => {
-			const agent = makeAgent({ agentAccessLevel: 'closed' });
-			userRepository.findOneBy.mockResolvedValue(agent);
-
-			const req = mock<Request>();
-			await expect(controller.getAgentCard(req, mock<Response>(), 'agent-1')).rejects.toThrow(
-				'Agent agent-1 not found',
-			);
-		});
-
-		it('should declare streaming as true and multiTurn as true', async () => {
-			const agent = makeAgent();
-			userRepository.findOneBy.mockResolvedValue(agent);
-
-			const req = mock<Request>({ protocol: 'http' });
-			req.get.mockReturnValue('localhost:5678');
-
-			const result = await controller.getAgentCard(req, mock<Response>(), 'agent-1');
-
-			expect(result.capabilities.streaming).toBe(true);
-			expect(result.capabilities.multiTurn).toBe(true);
-		});
-
-		it('should point interfaces URL to the correct task endpoint', async () => {
-			const agent = makeAgent();
-			userRepository.findOneBy.mockResolvedValue(agent);
-
-			const req = mock<Request>({ protocol: 'http' });
-			req.get.mockReturnValue('localhost:5678');
-
-			const result = await controller.getAgentCard(req, mock<Response>(), 'agent-1');
-
-			expect(result.interfaces[0].url).toBe('http://localhost:5678/rest/agents/agent-1/task');
-		});
-
-		it('should declare apiKey security scheme with x-n8n-api-key header', async () => {
-			const agent = makeAgent();
-			userRepository.findOneBy.mockResolvedValue(agent);
-
-			const req = mock<Request>({ protocol: 'https' });
-			req.get.mockReturnValue('example.com');
-
-			const result = await controller.getAgentCard(req, mock<Response>(), 'agent-1');
-
-			expect(result.securitySchemes.apiKey).toEqual({
-				type: 'apiKey',
-				name: 'x-n8n-api-key',
-				in: 'header',
-			});
-			expect(result.security).toEqual([{ apiKey: [] }]);
-		});
-
-		it('should use empty string when description is null', async () => {
-			const agent = makeAgent({ description: null });
-			userRepository.findOneBy.mockResolvedValue(agent);
-
-			const req = mock<Request>({ protocol: 'https' });
-			req.get.mockReturnValue('example.com');
-
-			const result = await controller.getAgentCard(req, mock<Response>(), 'agent-1');
-
-			expect(result.provider.description).toBe('');
-		});
-	});
-
-	describe('buildSystemPrompt', () => {
-		it('should include send_message instructions when canDelegate is true', () => {
-			const agents = [{ firstName: 'Helper', description: 'Helps with things' }];
-			const prompt = buildSystemPrompt('TestAgent', [], agents, true);
-
-			expect(prompt).toContain('send_message');
-			expect(prompt).toContain('Helper: Helps with things');
-		});
-
-		it('should exclude send_message when canDelegate is false', () => {
-			const agents = [{ firstName: 'Helper', description: 'Helps' }];
-			const prompt = buildSystemPrompt('TestAgent', [], agents, false);
-
-			expect(prompt).not.toContain('send_message');
-			expect(prompt).not.toContain('Helper');
-		});
-
-		it('should use description in agent list', () => {
-			const agents = [
-				{ firstName: 'DocBot', description: 'Knowledge Base' },
-				{ firstName: 'QABot', description: '' },
-			];
-			const prompt = buildSystemPrompt('TestAgent', [], agents, true);
-
-			expect(prompt).toContain('- DocBot: Knowledge Base');
-			expect(prompt).toContain('- QABot');
-			expect(prompt).not.toContain('QABot:');
-		});
-
-		it('should list workflows when provided', () => {
-			const workflows = [
-				{ id: 'wf-1', name: 'Deploy', active: true },
-				{ id: 'wf-2', name: 'Test', active: false },
-			];
-			const prompt = buildSystemPrompt('TestAgent', workflows, [], false);
-
-			expect(prompt).toContain('Deploy (id: wf-1, active: true)');
-			expect(prompt).toContain('Test (id: wf-2, active: false)');
-		});
-
-		it('should show (none) when no workflows', () => {
-			const prompt = buildSystemPrompt('TestAgent', [], [], false);
-			expect(prompt).toContain('(none)');
-		});
-
-		it('should only allow execute_workflow and complete when canDelegate is false', () => {
-			const prompt = buildSystemPrompt('TestAgent', [], [], false);
-			expect(prompt).toContain('"execute_workflow" or "complete"');
-			expect(prompt).not.toContain('"send_message"');
-		});
-
-		it('should include external agents in prompt alongside local agents', () => {
-			const localAgents = [{ firstName: 'LocalBot', description: 'Local helper' }];
-			const externalAgents = [{ firstName: 'RemoteBot', description: 'Remote helper' }];
-			const merged = [...localAgents, ...externalAgents];
-			const prompt = buildSystemPrompt('TestAgent', [], merged, true);
-
-			expect(prompt).toContain('LocalBot: Local helper');
-			expect(prompt).toContain('RemoteBot: Remote helper');
-			expect(prompt).toContain('send_message');
-		});
-
-		it('should show external-only agents when no local agents exist', () => {
-			const externalOnly = [{ firstName: 'ExtBot', description: 'External only' }];
-			const prompt = buildSystemPrompt('TestAgent', [], externalOnly, true);
-
-			expect(prompt).toContain('ExtBot: External only');
-			expect(prompt).toContain('send_message');
-		});
 	});
 
 	describe('createAgent', () => {
-		it('should save description and agentAccessLevel', async () => {
-			const user = makeAgent({ description: null, agentAccessLevel: null });
-			userRepository.createUserWithProject.mockResolvedValue({
-				user,
-				project: mock(),
-			});
-			userRepository.save.mockResolvedValue({
-				...user,
-				description: 'Test desc',
-				agentAccessLevel: 'open',
-			} as User);
+		it('should delegate to service and return result', async () => {
+			const dto = makeAgentDto({ description: 'Test desc', agentAccessLevel: 'open' });
+			agentsService.createAgent.mockResolvedValue(dto);
 
 			const result = await controller.createAgent(mock(), mock<Response>(), {
 				firstName: 'TestAgent',
@@ -264,33 +85,31 @@ describe('AgentsController', () => {
 				agentAccessLevel: 'open',
 			} as never);
 
-			expect(userRepository.save).toHaveBeenCalled();
+			expect(agentsService.createAgent).toHaveBeenCalled();
 			expect(result.description).toBe('Test desc');
 			expect(result.agentAccessLevel).toBe('open');
 		});
 	});
 
 	describe('updateAgent', () => {
-		it('should update description and agentAccessLevel', async () => {
-			const agent = makeAgent();
-			userRepository.findOneBy.mockResolvedValue(agent);
-			userRepository.save.mockResolvedValue({
-				...agent,
-				description: 'Updated desc',
-				agentAccessLevel: 'internal',
-			} as User);
+		it('should delegate to service and return updated agent', async () => {
+			const dto = makeAgentDto({ description: 'Updated desc', agentAccessLevel: 'internal' });
+			agentsService.updateAgent.mockResolvedValue(dto);
 
 			const result = await controller.updateAgent(mock(), mock<Response>(), 'agent-1', {
 				description: 'Updated desc',
 				agentAccessLevel: 'internal',
 			} as never);
 
+			expect(agentsService.updateAgent).toHaveBeenCalledWith('agent-1', {
+				description: 'Updated desc',
+				agentAccessLevel: 'internal',
+			});
 			expect(result.description).toBe('Updated desc');
-			expect(result.agentAccessLevel).toBe('internal');
 		});
 
-		it('should return 404 for non-existent agent', async () => {
-			userRepository.findOneBy.mockResolvedValue(null);
+		it('should propagate 404 for non-existent agent', async () => {
+			agentsService.updateAgent.mockRejectedValue(new Error('Agent bad-id not found'));
 
 			await expect(
 				controller.updateAgent(mock(), mock<Response>(), 'bad-id', {} as never),
@@ -299,21 +118,227 @@ describe('AgentsController', () => {
 	});
 
 	describe('getCapabilities', () => {
-		it('should include description and agentAccessLevel in response', async () => {
-			const agent = makeAgent({
+		it('should delegate to service', async () => {
+			const caps = {
+				agentId: 'agent-1',
+				agentName: 'TestAgent',
 				description: 'A helpful agent',
-				agentAccessLevel: 'open',
-			});
-			userRepository.findOne.mockResolvedValue(agent);
-			workflowSharingService.getSharedWorkflowIds.mockResolvedValue([]);
-			credentialsService.getMany.mockResolvedValue([]);
-			projectRelationRepository.findAllByUser.mockResolvedValue([]);
+				agentAccessLevel: 'open' as const,
+				llmConfigured: true,
+				projects: [] as Array<{ id: string; name: string }>,
+				workflows: [] as Array<{ id: string; name: string; active: boolean }>,
+				credentials: [] as Array<{ id: string; name: string; type: string }>,
+			};
+			agentsService.getCapabilities.mockResolvedValue(caps);
 
 			const result = await controller.getCapabilities(mock(), mock<Response>(), 'agent-1');
 
 			expect(result.description).toBe('A helpful agent');
 			expect(result.agentAccessLevel).toBe('open');
+			expect(result.llmConfigured).toBe(true);
 		});
+
+		it('should return 404 when queried with a non-agent user ID', async () => {
+			agentsService.getCapabilities.mockRejectedValue(new Error('Agent human-user-id not found'));
+
+			await expect(
+				controller.getCapabilities(mock(), mock<Response>(), 'human-user-id'),
+			).rejects.toThrow('Agent human-user-id not found');
+		});
+	});
+
+	describe('deleteAgent', () => {
+		it('should delete agent and return 204', async () => {
+			agentsService.deleteAgent.mockResolvedValue(undefined);
+
+			const res = mock<Response>();
+			res.status.mockReturnValue(res);
+
+			await controller.deleteAgent(mock(), res, 'agent-1');
+
+			expect(agentsService.deleteAgent).toHaveBeenCalledWith('agent-1');
+			expect(res.status).toHaveBeenCalledWith(204);
+		});
+
+		it('should propagate 404 for non-existent agent', async () => {
+			agentsService.deleteAgent.mockRejectedValue(new Error('Agent bad-id not found'));
+
+			await expect(controller.deleteAgent(mock(), mock<Response>(), 'bad-id')).rejects.toThrow(
+				'Agent bad-id not found',
+			);
+		});
+	});
+
+	describe('listAgents', () => {
+		it('should return all agents', async () => {
+			const agents = [
+				makeAgentDto({ id: 'a-1', firstName: 'Bot1' }),
+				makeAgentDto({ id: 'a-2', firstName: 'Bot2' }),
+			];
+			agentsService.listAgents.mockResolvedValue(agents);
+
+			const result = await controller.listAgents(mock());
+
+			expect(result).toHaveLength(2);
+			expect(result[0].id).toBe('a-1');
+			expect(result[1].id).toBe('a-2');
+		});
+
+		it('should return empty array when no agents exist', async () => {
+			agentsService.listAgents.mockResolvedValue([]);
+
+			const result = await controller.listAgents(mock());
+
+			expect(result).toEqual([]);
+		});
+	});
+
+	describe('dispatchTask', () => {
+		function makeAuthReq(accept: string) {
+			const req = mock<AuthenticatedRequest>();
+			req.user = { id: 'caller-1' } as AuthenticatedRequest['user'];
+			Object.defineProperty(req, 'headers', {
+				value: { accept, 'push-ref': 'test' },
+				writable: true,
+			});
+			return req;
+		}
+
+		it('should enforce access level before executing', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			agentsService.executeAgentTask.mockResolvedValue({
+				status: 'completed',
+				summary: 'Done',
+				steps: [],
+			});
+
+			const req = makeAuthReq('application/json');
+
+			await controller.dispatchTask(req, mock<Response>(), 'agent-1', {
+				prompt: 'Do something',
+			} as never);
+
+			expect(agentsService.enforceAccessLevel).toHaveBeenCalledWith('agent-1', 'caller-1');
+		});
+
+		it('should return JSON for non-stream requests', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			const taskResult = { status: 'completed', summary: 'Done', steps: [] };
+			agentsService.executeAgentTask.mockResolvedValue(taskResult);
+
+			const req = makeAuthReq('application/json');
+
+			const result = await controller.dispatchTask(req, mock<Response>(), 'agent-1', {
+				prompt: 'Test',
+			} as never);
+
+			expect(result).toEqual(taskResult);
+		});
+
+		it('should write SSE headers for stream requests', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			agentsService.executeAgentTask.mockResolvedValue({
+				status: 'completed',
+				summary: 'Done',
+				steps: [],
+			});
+
+			const req = makeAuthReq('text/event-stream');
+			const res = mock<Response>();
+
+			await controller.dispatchTask(req, res, 'agent-1', {
+				prompt: 'Test',
+			} as never);
+
+			expect(res.writeHead).toHaveBeenCalledWith(200, {
+				'Content-Type': 'text/event-stream; charset=UTF-8',
+				'Cache-Control': 'no-cache',
+				Connection: 'keep-alive',
+			});
+			expect(res.end).toHaveBeenCalled();
+		});
+	});
+});
+
+describe('buildSystemPrompt', () => {
+	it('should include send_message instructions when canDelegate is true', () => {
+		const agents = [{ id: 'a-1', firstName: 'Helper', description: 'Helps with things' }];
+		const prompt = buildSystemPrompt('TestAgent', [], agents, true);
+
+		expect(prompt).toContain('send_message');
+		expect(prompt).toContain('Helper (id: a-1): Helps with things');
+	});
+
+	it('should exclude send_message when canDelegate is false', () => {
+		const agents = [{ id: 'a-1', firstName: 'Helper', description: 'Helps' }];
+		const prompt = buildSystemPrompt('TestAgent', [], agents, false);
+
+		expect(prompt).not.toContain('send_message');
+		expect(prompt).not.toContain('Helper');
+	});
+
+	it('should use description in agent list', () => {
+		const agents = [
+			{ id: 'a-1', firstName: 'DocBot', description: 'Knowledge Base' },
+			{ id: 'a-2', firstName: 'QABot', description: '' },
+		];
+		const prompt = buildSystemPrompt('TestAgent', [], agents, true);
+
+		expect(prompt).toContain('DocBot (id: a-1): Knowledge Base');
+		expect(prompt).toContain('QABot (id: a-2)');
+	});
+
+	it('should list workflows when provided', () => {
+		const workflows = [
+			{ id: 'wf-1', name: 'Deploy', active: true },
+			{ id: 'wf-2', name: 'Test', active: false },
+		];
+		const prompt = buildSystemPrompt('TestAgent', workflows, [], false);
+
+		expect(prompt).toContain('Deploy (id: wf-1, active: true)');
+		expect(prompt).toContain('Test (id: wf-2, active: false)');
+	});
+
+	it('should show (none) when no workflows', () => {
+		const prompt = buildSystemPrompt('TestAgent', [], [], false);
+		expect(prompt).toContain('(none)');
+	});
+
+	it('should only allow execute_workflow and complete when canDelegate is false', () => {
+		const prompt = buildSystemPrompt('TestAgent', [], [], false);
+		expect(prompt).toContain('"execute_workflow" or "complete"');
+		expect(prompt).not.toContain('"send_message"');
+	});
+
+	it('should include toAgentId in delegation instructions', () => {
+		const agents = [{ id: 'a-1', firstName: 'Helper', description: 'Helps' }];
+		const prompt = buildSystemPrompt('TestAgent', [], agents, true);
+
+		expect(prompt).toContain('toAgentId');
+		expect(prompt).not.toContain('"toAgent"');
+	});
+
+	it('should include external agents in prompt alongside local agents', () => {
+		const localAgents = [{ id: 'a-1', firstName: 'LocalBot', description: 'Local helper' }];
+		const externalAgents = [
+			{ id: 'external:RemoteBot', firstName: 'RemoteBot', description: 'Remote helper' },
+		];
+		const merged = [...localAgents, ...externalAgents];
+		const prompt = buildSystemPrompt('TestAgent', [], merged, true);
+
+		expect(prompt).toContain('LocalBot (id: a-1): Local helper');
+		expect(prompt).toContain('RemoteBot (id: external:RemoteBot): Remote helper');
+		expect(prompt).toContain('send_message');
+	});
+
+	it('should show external-only agents when no local agents exist', () => {
+		const externalOnly = [
+			{ id: 'external:ExtBot', firstName: 'ExtBot', description: 'External only' },
+		];
+		const prompt = buildSystemPrompt('TestAgent', [], externalOnly, true);
+
+		expect(prompt).toContain('ExtBot (id: external:ExtBot): External only');
+		expect(prompt).toContain('send_message');
 	});
 });
 
@@ -324,7 +349,7 @@ describe('callExternalAgent', () => {
 		global.fetch = originalFetch;
 	});
 
-	it('should POST to external agent URL with correct headers and body', async () => {
+	it('should POST to external agent URL with correct headers and body (no keys)', async () => {
 		const config: ExternalAgentConfig = {
 			name: 'RemoteBot',
 			url: 'https://remote.example.com/rest/agents/abc/task',
@@ -338,19 +363,41 @@ describe('callExternalAgent', () => {
 			}),
 		});
 
-		const result = await callExternalAgent(config, 'Do something', { llm: 'key123' });
+		const result = await callExternalAgent(config, 'Do something');
 
-		expect(global.fetch).toHaveBeenCalledWith('https://remote.example.com/rest/agents/abc/task', {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-n8n-api-key': 'remote-api-key',
-			},
-			body: JSON.stringify({ prompt: 'Do something', keys: { llm: 'key123' } }),
-		});
+		expect(global.fetch).toHaveBeenCalledWith(
+			'https://remote.example.com/rest/agents/abc/task',
+			expect.objectContaining({
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-n8n-api-key': 'remote-api-key',
+				},
+				body: JSON.stringify({ prompt: 'Do something' }),
+			}),
+		);
 
 		expect(result.status).toBe('completed');
 		expect(result.summary).toBe('Done remotely');
+	});
+
+	it('should not forward keys in the request body', async () => {
+		const config: ExternalAgentConfig = {
+			name: 'RemoteBot',
+			url: 'https://remote.example.com/rest/agents/abc/task',
+			apiKey: 'key',
+		};
+
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ status: 'completed', summary: 'OK', steps: [] }),
+		});
+
+		await callExternalAgent(config, 'Hello');
+
+		const fetchCall = (global.fetch as jest.Mock).mock.calls[0];
+		const body = JSON.parse(fetchCall[1].body as string);
+		expect(body).not.toHaveProperty('keys');
 	});
 
 	it('should unwrap response without data envelope', async () => {
@@ -386,6 +433,75 @@ describe('callExternalAgent', () => {
 
 		await expect(callExternalAgent(config, 'Hello')).rejects.toThrow(
 			'External agent returned 500: Internal Server Error',
+		);
+	});
+});
+
+describe('callLlm', () => {
+	const originalFetch = global.fetch;
+
+	afterEach(() => {
+		global.fetch = originalFetch;
+	});
+
+	const defaultConfig: LlmConfig = {
+		apiKey: 'test-key',
+		baseUrl: 'https://api.anthropic.com',
+		model: 'claude-sonnet-4-5-20250929',
+	};
+
+	it('should use config values for API call', async () => {
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ content: [{ type: 'text', text: 'Hello' }] }),
+		});
+
+		const result = await callLlm(
+			[
+				{ role: 'system', content: 'You are helpful' },
+				{ role: 'user', content: 'Hi' },
+			],
+			defaultConfig,
+		);
+
+		expect(result).toBe('Hello');
+		expect(global.fetch).toHaveBeenCalledWith(
+			'https://api.anthropic.com/v1/messages',
+			expect.objectContaining({
+				headers: expect.objectContaining({
+					'x-api-key': 'test-key',
+				}),
+				body: expect.stringContaining('"model":"claude-sonnet-4-5-20250929"'),
+			}),
+		);
+	});
+
+	it('should use custom baseUrl from config', async () => {
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ content: [{ type: 'text', text: 'OK' }] }),
+		});
+
+		await callLlm([{ role: 'user', content: 'Hi' }], {
+			...defaultConfig,
+			baseUrl: 'https://custom.api.com',
+		});
+
+		expect(global.fetch).toHaveBeenCalledWith(
+			'https://custom.api.com/v1/messages',
+			expect.anything(),
+		);
+	});
+
+	it('should throw on non-OK response', async () => {
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: false,
+			status: 401,
+			text: async () => 'Unauthorized',
+		});
+
+		await expect(callLlm([{ role: 'user', content: 'Hi' }], defaultConfig)).rejects.toThrow(
+			'LLM API returned 401: Unauthorized',
 		);
 	});
 });

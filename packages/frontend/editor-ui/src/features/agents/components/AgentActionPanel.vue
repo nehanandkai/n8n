@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import { N8nButton, N8nHeading, N8nIcon, N8nText } from '@n8n/design-system';
+import { N8nButton, N8nCallout, N8nHeading, N8nIcon, N8nText } from '@n8n/design-system';
 import { useAgentPanelStore } from '../agentPanel.store';
 import AgentAvatarComp from './AgentAvatar.vue';
 
 const panelStore = useAgentPanelStore();
 const taskPrompt = ref('');
-const llmApiKey = ref('');
 
 const isEditingName = ref(false);
 const editName = ref('');
@@ -56,8 +55,7 @@ function cancelEditAvatar() {
 async function onRunTask() {
 	const prompt = taskPrompt.value.trim();
 	if (!prompt) return;
-	const keys = llmApiKey.value.trim() ? { llmApiKey: llmApiKey.value.trim() } : undefined;
-	await panelStore.dispatchTask(prompt, keys);
+	await panelStore.dispatchTask(prompt);
 }
 
 function stepIcon(step: { toAgent?: string; external?: boolean; workflowName?: string }) {
@@ -218,6 +216,10 @@ function stepStatusIcon(status: string) {
 			<!-- Task Input -->
 			<section :class="$style.section">
 				<div :class="$style.sectionTitle">Run a Task</div>
+				<N8nCallout v-if="!panelStore.llmConfigured" theme="warning" :class="$style.llmWarning">
+					No LLM credential found. Share an Anthropic credential with this agent to enable task
+					execution.
+				</N8nCallout>
 				<textarea
 					v-model="taskPrompt"
 					:class="$style.taskInput"
@@ -226,25 +228,9 @@ function stepStatusIcon(status: string) {
 					:disabled="panelStore.isSubmitting"
 				/>
 
-				<!-- Advanced: BYOK -->
-				<details :class="$style.advanced">
-					<summary :class="$style.advancedSummary">Advanced</summary>
-					<div :class="$style.advancedContent">
-						<label :class="$style.advancedLabel">LLM API Key</label>
-						<input
-							v-model="llmApiKey"
-							:class="$style.advancedInput"
-							type="password"
-							placeholder="sk-..."
-							data-testid="agent-llm-key-input"
-							autocomplete="off"
-						/>
-					</div>
-				</details>
-
 				<N8nButton
 					:label="panelStore.isSubmitting ? 'Running...' : 'Run Task'"
-					:disabled="!taskPrompt.trim() || panelStore.isSubmitting"
+					:disabled="!taskPrompt.trim() || panelStore.isSubmitting || !panelStore.llmConfigured"
 					:loading="panelStore.isSubmitting"
 					size="medium"
 					data-testid="agent-run-task"
@@ -562,6 +548,10 @@ function stepStatusIcon(status: string) {
 	color: var(--color--text--tint-2);
 }
 
+.llmWarning {
+	margin-bottom: var(--spacing--2xs);
+}
+
 .taskInput {
 	width: 100%;
 	min-height: 80px;
@@ -586,49 +576,6 @@ function stepStatusIcon(status: string) {
 
 	&:disabled {
 		opacity: 0.6;
-	}
-}
-
-// BYOK Advanced section
-.advanced {
-	margin-top: var(--spacing--2xs);
-}
-
-.advancedSummary {
-	font-size: var(--font-size--2xs);
-	color: var(--color--text--tint-2);
-	cursor: pointer;
-	user-select: none;
-
-	&:hover {
-		color: var(--color--text--tint-1);
-	}
-}
-
-.advancedContent {
-	margin-top: var(--spacing--2xs);
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing--4xs);
-}
-
-.advancedLabel {
-	font-size: var(--font-size--2xs);
-	color: var(--color--text--tint-2);
-}
-
-.advancedInput {
-	padding: var(--spacing--4xs) var(--spacing--2xs);
-	border: var(--border);
-	border-radius: var(--radius);
-	font-family: var(--font-family);
-	font-size: var(--font-size--sm);
-	color: var(--color--text);
-	background: var(--color--background);
-
-	&:focus {
-		outline: none;
-		border-color: var(--color--primary);
 	}
 }
 

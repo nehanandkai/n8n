@@ -35,24 +35,6 @@ type AgentFixtures = {
 	externalRequest: Awaited<ReturnType<typeof request.newContext>>;
 };
 
-/**
- * Container config that passes the LLM API key to the n8n server.
- * The agents controller reads N8N_AGENT_LLM_API_KEY at module load time.
- */
-export const agentTestConfig = {
-	capability: {
-		env: {
-			N8N_AGENT_LLM_API_KEY,
-			...(process.env.N8N_AGENT_LLM_BASE_URL && {
-				N8N_AGENT_LLM_BASE_URL: process.env.N8N_AGENT_LLM_BASE_URL,
-			}),
-			...(process.env.N8N_AGENT_LLM_MODEL && {
-				N8N_AGENT_LLM_MODEL: process.env.N8N_AGENT_LLM_MODEL,
-			}),
-		},
-	},
-} as const;
-
 export const test = base.extend<AgentFixtures>({
 	agentLlmApiKey: async ({}, use) => {
 		await use(N8N_AGENT_LLM_API_KEY);

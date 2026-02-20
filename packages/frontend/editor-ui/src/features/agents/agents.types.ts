@@ -50,6 +50,7 @@ export interface AgentCapabilitiesResponse {
 	agentName: string;
 	description?: string | null;
 	agentAccessLevel?: 'open' | 'internal' | 'closed' | null;
+	llmConfigured: boolean;
 	projects: Array<{ id: string; name: string }>;
 	workflows: Array<{ id: string; name: string; active: boolean }>;
 	credentials: Array<{ id: string; name: string; type: string }>;

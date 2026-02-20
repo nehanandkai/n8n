@@ -162,3 +162,4 @@ export { CreateQuickConnectCredentialDto } from './quick-connect/create-quick-co
 
 export { CreateAgentDto } from './agents/create-agent.dto';
 export { UpdateAgentDto } from './agents/update-agent.dto';
+export { DispatchTaskDto } from './agents/dispatch-task.dto';

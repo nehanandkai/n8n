@@ -144,10 +144,9 @@ export class AgentApiHelper {
 		agentId: string,
 		prompt: string,
 		externalAgents: ExternalAgentConfig[],
-		keys?: Record<string, string>,
 	): Promise<AgentTaskResult> {
 		const response = await this.api.request.post(`/rest/agents/${agentId}/task`, {
-			data: { prompt, externalAgents, ...(keys ? { keys } : {}) },
+			data: { prompt, externalAgents },
 		});
 
 		if (!response.ok()) {
@@ -158,5 +157,42 @@ export class AgentApiHelper {
 
 		const result = await response.json();
 		return result.data ?? result;
+	}
+
+	// --- Public API (/api/v1/) helpers ---
+
+	async getCardViaPublicApi(agentId: string, apiKey: string): Promise<AgentCard> {
+		const response = await this.api.request.get(`/api/v1/agents/${agentId}/card`, {
+			headers: { 'x-n8n-api-key': apiKey },
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to get agent card via public API: ${await response.text()}`);
+		}
+
+		return (await response.json()) as AgentCard;
+	}
+
+	async getCardViaPublicApiRaw(agentId: string, apiKey: string) {
+		return await this.api.request.get(`/api/v1/agents/${agentId}/card`, {
+			headers: { 'x-n8n-api-key': apiKey },
+		});
+	}
+
+	async dispatchTaskViaPublicApi(
+		agentId: string,
+		prompt: string,
+		apiKey: string,
+	): Promise<AgentTaskResult> {
+		const response = await this.api.request.post(`/api/v1/agents/${agentId}/task`, {
+			data: { prompt },
+			headers: { 'x-n8n-api-key': apiKey },
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to dispatch agent task via public API: ${await response.text()}`);
+		}
+
+		return (await response.json()) as AgentTaskResult;
 	}
 }
