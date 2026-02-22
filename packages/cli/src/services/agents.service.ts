@@ -8,6 +8,7 @@ import {
 } from '@n8n/db';
 import { Service } from '@n8n/di';
 import crypto from 'node:crypto';
+import { Cipher } from 'n8n-core';
 import {
 	CHAT_TRIGGER_NODE_TYPE,
 	FORM_TRIGGER_NODE_TYPE,
@@ -17,6 +18,7 @@ import {
 	ManualExecutionCancelledError,
 	createRunExecutionData,
 	jsonStringify,
+	type IExecutionContext,
 	type INode,
 	type IPinData,
 	type IWorkflowExecutionDataProcess,
@@ -123,6 +125,7 @@ export class AgentsService {
 		private readonly activeExecutions: ActiveExecutions,
 		private readonly push: Push,
 		private readonly publicApiKeyService: PublicApiKeyService,
+		private readonly cipher: Cipher,
 	) {}
 
 	private broadcastAgentEvent(agentId: string, event: Record<string, unknown>) {
@@ -271,10 +274,26 @@ export class AgentsService {
 	}
 
 	async getAgentCard(agentId: string, baseUrl: string) {
-		const agent = await this.userRepository.findOneBy({ id: agentId, type: 'agent' });
+		const agent = await this.userRepository.findOne({
+			where: { id: agentId, type: 'agent' },
+			relations: ['role'],
+		});
 
 		if (!agent || agent.agentAccessLevel === 'closed') {
 			throw new NotFoundError(`Agent ${agentId} not found`);
+		}
+
+		const credentials = await this.credentialsService.getMany(agent, {
+			includeGlobal: false,
+		});
+
+		const seenTypes = new Set<string>();
+		const requiredCredentials: Array<{ type: string; description: string }> = [];
+		for (const cred of credentials) {
+			if (!seenTypes.has(cred.type)) {
+				seenTypes.add(cred.type);
+				requiredCredentials.push({ type: cred.type, description: cred.name });
+			}
 		}
 
 		return {
@@ -304,6 +323,7 @@ export class AgentsService {
 				},
 			},
 			security: [{ apiKey: [] }],
+			requiredCredentials,
 		};
 	}
 
@@ -340,7 +360,15 @@ export class AgentsService {
 		return agentRelations.some((r) => callerProjectIds.has(r.projectId));
 	}
 
-	private async resolveLlmConfig(agentUser: User): Promise<LlmConfig> {
+	private async resolveLlmConfig(agentUser: User, byokApiKey?: string): Promise<LlmConfig> {
+		if (byokApiKey) {
+			return {
+				apiKey: byokApiKey,
+				baseUrl: LLM_BASE_URL,
+				model: LLM_MODEL,
+			};
+		}
+
 		const credentials = await this.credentialsService.getMany(agentUser, {
 			includeGlobal: false,
 		});
@@ -401,9 +429,19 @@ export class AgentsService {
 			onStep?: StepCallback;
 			externalAgents?: ExternalAgentConfig[];
 			callChain?: Set<string>;
+			byokApiKey?: string;
+			callerId?: string;
+			workflowCredentials?: Record<string, Record<string, string>>;
 		},
 	): Promise<AgentTaskResult> {
-		const { onStep: originalOnStep, externalAgents, callChain = new Set<string>() } = options ?? {};
+		const {
+			onStep: originalOnStep,
+			externalAgents,
+			callChain = new Set<string>(),
+			byokApiKey,
+			callerId,
+			workflowCredentials,
+		} = options ?? {};
 
 		const onStep: StepCallback | undefined = (event) => {
 			originalOnStep?.(event);
@@ -431,6 +469,9 @@ export class AgentsService {
 				onStep,
 				externalAgents,
 				callChain,
+				byokApiKey,
+				callerId,
+				workflowCredentials,
 			);
 		} catch (error) {
 			this.broadcastAgentDone(agentId, {
@@ -452,6 +493,9 @@ export class AgentsService {
 		onStep: StepCallback | undefined,
 		externalAgents: ExternalAgentConfig[] | undefined,
 		callChain: Set<string>,
+		byokApiKey: string | undefined,
+		callerId: string | undefined,
+		workflowCredentials: Record<string, Record<string, string>> | undefined,
 	): Promise<AgentTaskResult> {
 		const agentUser = await this.userRepository.findOne({
 			where: { id: agentId, type: 'agent' },
@@ -462,11 +506,12 @@ export class AgentsService {
 			throw new NotFoundError(`Agent ${agentId} not found`);
 		}
 
-		const llmConfig = await this.resolveLlmConfig(agentUser);
+		const llmConfig = await this.resolveLlmConfig(agentUser, byokApiKey);
 		if (!llmConfig.apiKey) {
 			return {
 				status: 'error',
-				message: 'No LLM API key available. Share an Anthropic credential with this agent.',
+				message:
+					'No LLM API key available. Share an Anthropic credential with this agent or provide a BYOK key.',
 				steps: [],
 			};
 		}
@@ -582,7 +627,13 @@ export class AgentsService {
 				});
 
 				try {
-					const result = await this.runWorkflow(agentUser, parsed.workflowId, prompt);
+					const result = await this.runWorkflow(
+						agentUser,
+						parsed.workflowId,
+						prompt,
+						callerId,
+						workflowCredentials,
+					);
 					const stepResult = result.success ? 'success' : 'failed';
 					this.recordObservation(steps, messages, onStep, {
 						action: 'execute_workflow',
@@ -702,6 +753,8 @@ export class AgentsService {
 		user: User,
 		workflowId: string,
 		agentPrompt?: string,
+		callerId?: string,
+		workflowCredentials?: Record<string, Record<string, string>>,
 	): Promise<{ success: boolean; executionId: string; data?: unknown }> {
 		const workflow = await this.workflowFinderService.findWorkflowForUser(
 			workflowId,
@@ -726,6 +779,22 @@ export class AgentsService {
 
 		const pinData = buildPinData(triggerNode, agentPrompt);
 
+		let runtimeData: IExecutionContext | undefined;
+		if (callerId || workflowCredentials) {
+			const credentialContext = JSON.stringify({
+				version: 1,
+				identity: callerId ?? 'anonymous',
+				metadata: { source: 'agent-a2a', agentId: user.id, workflowCredentials },
+			});
+			runtimeData = {
+				version: 1,
+				establishedAt: Date.now(),
+				source: getExecutionMode(triggerNode),
+				triggerNode: { name: triggerNode.name, type: triggerNode.type },
+				credentials: this.cipher.encrypt(credentialContext),
+			};
+		}
+
 		const runData: IWorkflowExecutionDataProcess = {
 			executionMode: getExecutionMode(triggerNode),
 			workflowData: { ...workflow, nodes, connections },
@@ -747,6 +816,7 @@ export class AgentsService {
 					],
 					waitingExecution: {},
 					waitingExecutionSource: {},
+					runtimeData,
 				},
 			}),
 		};

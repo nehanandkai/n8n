@@ -34,10 +34,17 @@ export = {
 				return;
 			}
 
-			const { prompt, externalAgents } = req.body as {
+			const { prompt, externalAgents, byokCredentials, callerId } = req.body as {
 				prompt: string;
 				externalAgents?: ExternalAgentConfig[];
+				byokCredentials?: {
+					anthropicApiKey?: string;
+					workflowCredentials?: Record<string, Record<string, string>>;
+				};
+				callerId?: string;
 			};
+			const byokApiKey = byokCredentials?.anthropicApiKey;
+			const workflowCredentials = byokCredentials?.workflowCredentials;
 			const wantsStream = req.headers.accept?.includes('text/event-stream');
 			const callChain = new Set<string>();
 
@@ -46,7 +53,7 @@ export = {
 					agentId,
 					prompt,
 					{ remaining: MAX_ITERATIONS },
-					{ externalAgents, callChain },
+					{ externalAgents, callChain, byokApiKey, callerId, workflowCredentials },
 				);
 				return res.json(result);
 			}
@@ -62,7 +69,14 @@ export = {
 					agentId,
 					prompt,
 					{ remaining: MAX_ITERATIONS },
-					{ onStep: (event) => sseWrite(res, event), externalAgents, callChain },
+					{
+						onStep: (event) => sseWrite(res, event),
+						externalAgents,
+						callChain,
+						byokApiKey,
+						callerId,
+						workflowCredentials,
+					},
 				);
 
 				sseWrite(res, {

@@ -78,11 +78,18 @@ export function createA2ARouter(): express.Router {
 			const { prompt, taskId, contextId } = fromA2ARequest(a2aReq);
 			const agentsService = Container.get(AgentsService);
 
+			const byokCreds = a2aReq.metadata?.byokCredentials as
+				| { anthropicApiKey?: string; workflowCredentials?: Record<string, Record<string, string>> }
+				| undefined;
+			const byokApiKey = byokCreds?.anthropicApiKey;
+			const callerId = a2aReq.metadata?.callerId as string | undefined;
+			const workflowCredentials = byokCreds?.workflowCredentials;
+
 			const result = await agentsService.executeAgentTask(
 				user.id,
 				prompt,
 				{ remaining: MAX_ITERATIONS },
-				{ callChain: new Set<string>() },
+				{ callChain: new Set<string>(), byokApiKey, callerId, workflowCredentials },
 			);
 
 			res.set('A2A-Version', A2A_VERSION);
@@ -106,6 +113,13 @@ export function createA2ARouter(): express.Router {
 
 			const { prompt, taskId, contextId } = fromA2ARequest(a2aReq);
 			const agentsService = Container.get(AgentsService);
+
+			const streamByokCreds = a2aReq.metadata?.byokCredentials as
+				| { anthropicApiKey?: string; workflowCredentials?: Record<string, Record<string, string>> }
+				| undefined;
+			const streamByokApiKey = streamByokCreds?.anthropicApiKey;
+			const streamCallerId = a2aReq.metadata?.callerId as string | undefined;
+			const streamWorkflowCredentials = streamByokCreds?.workflowCredentials;
 
 			res.writeHead(200, {
 				'Content-Type': 'text/event-stream; charset=UTF-8',
@@ -133,6 +147,9 @@ export function createA2ARouter(): express.Router {
 							sseWrite(res, internalStepToA2AStream(event, taskId, contextId));
 						},
 						callChain: new Set<string>(),
+						byokApiKey: streamByokApiKey,
+						callerId: streamCallerId,
+						workflowCredentials: streamWorkflowCredentials,
 					},
 				);
 

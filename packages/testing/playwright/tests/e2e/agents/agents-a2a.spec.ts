@@ -1048,3 +1048,127 @@ test.describe('Public API Endpoints (/api/v1/)', () => {
 		expect(card.interfaces[0].url).not.toContain('/rest/');
 	});
 });
+
+test.describe('Agent Card: requiredCredentials', () => {
+	test('should include requiredCredentials in agent card when agent has credentials', async ({
+		agent,
+		agentProject,
+		anthropicCredential,
+		api,
+		ownerApiKey,
+	}) => {
+		test.skip(!anthropicCredential, 'TEST_CREDENTIAL_ANTHROPIC not set — skipping');
+
+		await api.projects.addUserToProject(agentProject.id, agent.id, 'project:editor');
+
+		const card = await api.agents.getCardViaPublicApi(agent.id, ownerApiKey.rawApiKey);
+
+		expect(card.requiredCredentials).toBeDefined();
+		expect(card.requiredCredentials!.length).toBeGreaterThan(0);
+
+		const anthropicEntry = card.requiredCredentials!.find((c) => c.type === 'anthropicApi');
+		expect(anthropicEntry).toBeTruthy();
+		expect(anthropicEntry!.description).toBeTruthy();
+	});
+
+	test('should return empty requiredCredentials when agent has no credentials', async ({
+		api,
+		ownerApiKey,
+	}) => {
+		// Create a fresh agent with no project membership (no credentials)
+		const bareAgent = await api.agents.createAgent({
+			firstName: `Bare-${nanoid(8)}`,
+			agentAccessLevel: 'external',
+		});
+
+		const card = await api.agents.getCardViaPublicApi(bareAgent.id, ownerApiKey.rawApiKey);
+
+		expect(card.requiredCredentials).toBeDefined();
+		expect(card.requiredCredentials).toEqual([]);
+	});
+});
+
+test.describe('BYOK (Bring Your Own Key)', () => {
+	test('should return error without BYOK key and no shared credential', async ({
+		api,
+		ownerApiKey,
+	}) => {
+		// Create agent with no credentials
+		const bareAgent = await api.agents.createAgent({
+			firstName: `NoCred-${nanoid(8)}`,
+			agentAccessLevel: 'external',
+		});
+
+		const task = await api.agents.dispatchTaskViaPublicApi(
+			bareAgent.id,
+			'Hello',
+			ownerApiKey.rawApiKey,
+		);
+
+		expect(task.status).toBe('error');
+		expect(task.message).toContain('No LLM API key');
+	});
+
+	test('should succeed with BYOK key when agent has no shared credential', async ({
+		api,
+		ownerApiKey,
+		testCredentials,
+	}) => {
+		test.skip(!testCredentials.anthropic, 'TEST_CREDENTIAL_ANTHROPIC not set — skipping LLM tests');
+		test.setTimeout(180_000);
+
+		// Create agent with no credentials but provide BYOK
+		const bareAgent = await api.agents.createAgent({
+			firstName: `BYOK-${nanoid(8)}`,
+			agentAccessLevel: 'external',
+		});
+
+		const task = await api.agents.dispatchTaskWithByokViaPublicApi(
+			bareAgent.id,
+			'Just respond with "BYOK working" — do not execute any workflows.',
+			{ anthropicApiKey: testCredentials.anthropic },
+			ownerApiKey.rawApiKey,
+		);
+
+		expect(task.status).toBe('completed');
+		expect(task.summary).toBeTruthy();
+	});
+
+	test('should work with BYOK via SSE streaming', async ({
+		api,
+		ownerApiKey,
+		testCredentials,
+		backendUrl,
+	}) => {
+		test.skip(!testCredentials.anthropic, 'TEST_CREDENTIAL_ANTHROPIC not set — skipping LLM tests');
+		test.setTimeout(180_000);
+
+		const bareAgent = await api.agents.createAgent({
+			firstName: `BYOKStream-${nanoid(8)}`,
+			agentAccessLevel: 'external',
+		});
+
+		const response = await fetch(`${backendUrl}/api/v1/agents/${bareAgent.id}/task`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'text/event-stream',
+				'x-n8n-api-key': ownerApiKey.rawApiKey,
+			},
+			body: JSON.stringify({
+				prompt: 'Just respond with "BYOK streaming works" — do not execute any workflows.',
+				byokCredentials: { anthropicApiKey: testCredentials.anthropic },
+			}),
+		});
+
+		expect(response.ok).toBe(true);
+		expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+		const body = await response.text();
+		const events = parseSseEvents(body);
+
+		const doneEvent = events[events.length - 1];
+		expect(doneEvent.type).toBe('done');
+		expect(doneEvent.status).toBe('completed');
+	});
+});

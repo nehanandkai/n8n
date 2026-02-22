@@ -32,6 +32,12 @@ export interface AgentCard {
 	interfaces: Array<{ type: string; url: string }>;
 	securitySchemes: Record<string, unknown>;
 	security: Array<Record<string, unknown[]>>;
+	requiredCredentials?: Array<{ type: string; description: string }>;
+}
+
+export interface ByokCredentials {
+	anthropicApiKey?: string;
+	workflowCredentials?: Record<string, Record<string, string>>;
 }
 
 export interface ExternalAgentConfig {
@@ -207,5 +213,42 @@ export class AgentApiHelper {
 			data: { prompt },
 			headers: { 'x-n8n-api-key': apiKey },
 		});
+	}
+
+	// --- BYOK helpers ---
+
+	async dispatchTaskWithByok(
+		agentId: string,
+		prompt: string,
+		byokCredentials: ByokCredentials,
+	): Promise<AgentTaskResult> {
+		const response = await this.api.request.post(`/api/v1/agents/${agentId}/task`, {
+			data: { prompt, byokCredentials },
+			headers: { 'x-n8n-api-key': '' }, // Will be set by caller via externalRequest
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to dispatch BYOK task: ${await response.text()}`);
+		}
+
+		return (await response.json()) as AgentTaskResult;
+	}
+
+	async dispatchTaskWithByokViaPublicApi(
+		agentId: string,
+		prompt: string,
+		byokCredentials: ByokCredentials,
+		apiKey: string,
+	): Promise<AgentTaskResult> {
+		const response = await this.api.request.post(`/api/v1/agents/${agentId}/task`, {
+			data: { prompt, byokCredentials },
+			headers: { 'x-n8n-api-key': apiKey },
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to dispatch BYOK task via public API: ${await response.text()}`);
+		}
+
+		return (await response.json()) as AgentTaskResult;
 	}
 }

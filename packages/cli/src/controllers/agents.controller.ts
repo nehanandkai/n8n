@@ -87,7 +87,9 @@ export class AgentsController {
 			return undefined;
 		}
 
-		const { prompt, externalAgents } = payload;
+		const { prompt, externalAgents, byokCredentials, callerId } = payload;
+		const byokApiKey = byokCredentials?.anthropicApiKey;
+		const workflowCredentials = byokCredentials?.workflowCredentials;
 		const wantsStream = req.headers.accept?.includes('text/event-stream');
 		const callChain = new Set<string>();
 
@@ -96,7 +98,13 @@ export class AgentsController {
 				agentId,
 				prompt,
 				{ remaining: MAX_ITERATIONS },
-				{ externalAgents: externalAgents as ExternalAgentConfig[] | undefined, callChain },
+				{
+					externalAgents: externalAgents as ExternalAgentConfig[] | undefined,
+					callChain,
+					byokApiKey,
+					callerId,
+					workflowCredentials,
+				},
 			);
 			res.json(result);
 			return undefined;
@@ -117,6 +125,9 @@ export class AgentsController {
 					onStep: (event) => sseWrite(res, event),
 					externalAgents: externalAgents as ExternalAgentConfig[] | undefined,
 					callChain,
+					byokApiKey,
+					callerId,
+					workflowCredentials,
 				},
 			);
 

@@ -447,6 +447,16 @@
         <label>LLM API Key</label>
         <input id="llmKey" type="password" placeholder="sk-ant-... or sk-...">
       </div>
+      <div class="field">
+        <label>Caller ID</label>
+        <input id="callerId" placeholder="caller-identity (for dynamic credential resolution)">
+      </div>
+    </details>
+
+    <details id="workflowCredsSection">
+      <summary>Workflow Credentials (Per-Request)</summary>
+      <div id="workflowCredRows"></div>
+      <button type="button" style="margin-top:8px;flex:0;padding:6px 12px;font-size:12px;background:var(--surface-alt);color:var(--text);border:1px solid rgba(255,255,255,0.15);border-radius:var(--radius);cursor:pointer;" onclick="addWorkflowCredRow()">+ Add Credential</button>
     </details>
 
     <div class="actions">
@@ -504,7 +514,20 @@ function runTask() {
   // BYOK
   const llmKey = $('llmKey').value.trim();
   if (llmKey) {
-    body.keys = { llm: llmKey };
+    body.byokCredentials = { anthropicApiKey: llmKey };
+  }
+
+  // Workflow Credentials
+  const wfCreds = collectWorkflowCredentials();
+  if (Object.keys(wfCreds).length > 0) {
+    if (!body.byokCredentials) body.byokCredentials = {};
+    body.byokCredentials.workflowCredentials = wfCreds;
+  }
+
+  // Caller ID
+  const callerId = $('callerId').value.trim();
+  if (callerId) {
+    body.callerId = callerId;
   }
 
   $('runBtn').disabled = true;
@@ -839,6 +862,37 @@ function finish() {
   $('runBtn').disabled = false;
   $('stopBtn').disabled = true;
   abortController = null;
+}
+
+// --- Workflow Credentials ---
+function addWorkflowCredRow(credType, credKey, credValue) {
+  const container = $('workflowCredRows');
+  const row = document.createElement('div');
+  row.className = 'field-row';
+  row.style.marginTop = '8px';
+  row.style.gridTemplateColumns = '1fr 1fr 1fr auto';
+  row.innerHTML = `
+    <input class="wc-type" placeholder="Credential type (e.g. currentsApi)" value="${credType || ''}" style="padding:8px;background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:var(--radius);color:var(--text);font-size:12px;font-family:var(--mono);">
+    <input class="wc-key" placeholder="Key (e.g. apiKey)" value="${credKey || ''}" style="padding:8px;background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:var(--radius);color:var(--text);font-size:12px;font-family:var(--mono);">
+    <input class="wc-value" placeholder="Value" type="password" value="${credValue || ''}" style="padding:8px;background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:var(--radius);color:var(--text);font-size:12px;font-family:var(--mono);">
+    <button type="button" onclick="this.parentElement.remove()" style="flex:0;padding:6px 10px;font-size:12px;background:var(--error);color:white;border:none;border-radius:var(--radius);cursor:pointer;">x</button>
+  `;
+  container.appendChild(row);
+}
+
+function collectWorkflowCredentials() {
+  const result = {};
+  const rows = $('workflowCredRows').querySelectorAll('.field-row');
+  rows.forEach(row => {
+    const type = row.querySelector('.wc-type').value.trim();
+    const key = row.querySelector('.wc-key').value.trim();
+    const value = row.querySelector('.wc-value').value.trim();
+    if (type && key && value) {
+      if (!result[type]) result[type] = {};
+      result[type][key] = value;
+    }
+  });
+  return result;
 }
 
 // Enter key in prompt runs task

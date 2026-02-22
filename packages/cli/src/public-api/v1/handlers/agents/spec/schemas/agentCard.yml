@@ -63,3 +63,17 @@ properties:
     type: array
     items:
       type: object
+  requiredCredentials:
+    type: array
+    description: Credential types the agent needs. Callers should provide these via BYOK or ensure the agent has shared access.
+    items:
+      type: object
+      properties:
+        type:
+          type: string
+          description: The credential type identifier.
+          example: anthropicApi
+        description:
+          type: string
+          description: Human-readable name of the credential.
+          example: My Anthropic Key

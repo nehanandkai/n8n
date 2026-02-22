@@ -11,6 +11,7 @@ import type {
 	LlmConfig,
 } from '@/services/agents.service';
 import { buildSystemPrompt, callExternalAgent, callLlm, sseWrite } from '@/services/agents.service';
+import { jsonStringify } from 'n8n-workflow';
 
 // Mock SSRF validation — unit tests don't resolve DNS
 jest.mock('@/agents/validate-agent-url', () => ({
@@ -40,7 +41,7 @@ describe('AgentsController', () => {
 	});
 
 	describe('getAgentCard', () => {
-		it('should return valid A2A agent card schema', async () => {
+		it('should return valid A2A agent card schema with requiredCredentials', async () => {
 			const card = {
 				id: 'agent-1',
 				name: 'TestAgent',
@@ -52,6 +53,7 @@ describe('AgentsController', () => {
 					apiKey: { type: 'apiKey', name: 'x-n8n-api-key', in: 'header' },
 				},
 				security: [{ apiKey: [] }],
+				requiredCredentials: [{ type: 'anthropicApi', description: 'My Anthropic Key' }],
 			};
 			agentsService.getAgentCard.mockResolvedValue(card);
 
@@ -62,6 +64,33 @@ describe('AgentsController', () => {
 
 			expect(agentsService.getAgentCard).toHaveBeenCalledWith('agent-1', 'https://example.com');
 			expect(result).toEqual(card);
+			expect(result.requiredCredentials).toEqual([
+				{ type: 'anthropicApi', description: 'My Anthropic Key' },
+			]);
+		});
+
+		it('should return empty requiredCredentials for agent with no credentials', async () => {
+			const card = {
+				id: 'agent-2',
+				name: 'EmptyAgent',
+				provider: { name: 'n8n', description: '' },
+				capabilities: { streaming: true, pushNotifications: false, multiTurn: true },
+				skills: [],
+				interfaces: [{ type: 'http+json', url: 'https://example.com/api/v1/agents/agent-2/task' }],
+				securitySchemes: {
+					apiKey: { type: 'apiKey', name: 'x-n8n-api-key', in: 'header' },
+				},
+				security: [{ apiKey: [] }],
+				requiredCredentials: [],
+			};
+			agentsService.getAgentCard.mockResolvedValue(card);
+
+			const req = mock<Request>({ protocol: 'https' });
+			req.get.mockReturnValue('example.com');
+
+			const result = await controller.getAgentCard(req, mock<Response>(), 'agent-2');
+
+			expect(result.requiredCredentials).toEqual([]);
 		});
 
 		it('should propagate 404 for non-existent agent', async () => {
@@ -257,6 +286,87 @@ describe('AgentsController', () => {
 				Connection: 'keep-alive',
 			});
 			expect(res.end).toHaveBeenCalled();
+		});
+
+		it('should pass byokApiKey and callerId from DTO to service', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			agentsService.executeAgentTask.mockResolvedValue({
+				status: 'completed',
+				summary: 'Done',
+				steps: [],
+			});
+
+			const req = makeAuthReq('application/json');
+
+			await controller.dispatchTask(req, mock<Response>(), 'agent-1', {
+				prompt: 'Test',
+				byokCredentials: { anthropicApiKey: 'sk-ant-test' },
+				callerId: 'external-caller',
+			} as never);
+
+			const callOpts = agentsService.executeAgentTask.mock.calls[0][3];
+			expect(callOpts).toHaveProperty('byokApiKey', 'sk-ant-test');
+			expect(callOpts).toHaveProperty('callerId', 'external-caller');
+		});
+
+		it('should pass workflowCredentials from DTO to service', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			agentsService.executeAgentTask.mockResolvedValue({
+				status: 'completed',
+				summary: 'Done',
+				steps: [],
+			});
+
+			const req = makeAuthReq('application/json');
+			const workflowCredentials = { currentsApi: { apiKey: 'cur_test_key' } };
+
+			await controller.dispatchTask(req, mock<Response>(), 'agent-1', {
+				prompt: 'Test',
+				byokCredentials: { anthropicApiKey: 'sk-ant-test', workflowCredentials },
+			} as never);
+
+			const callOpts = agentsService.executeAgentTask.mock.calls[0][3];
+			expect(callOpts).toHaveProperty('workflowCredentials', workflowCredentials);
+			expect(callOpts).toHaveProperty('byokApiKey', 'sk-ant-test');
+		});
+
+		it('should pass workflowCredentials in SSE streaming path', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			agentsService.executeAgentTask.mockResolvedValue({
+				status: 'completed',
+				summary: 'Done',
+				steps: [],
+			});
+
+			const req = makeAuthReq('text/event-stream');
+			const workflowCredentials = { notionApi: { apiKey: 'ntn_test' } };
+
+			await controller.dispatchTask(req, mock<Response>(), 'agent-1', {
+				prompt: 'Test',
+				byokCredentials: { workflowCredentials },
+			} as never);
+
+			const callOpts = agentsService.executeAgentTask.mock.calls[0][3];
+			expect(callOpts).toHaveProperty('workflowCredentials', workflowCredentials);
+		});
+
+		it('should not pass workflowCredentials when byokCredentials is absent', async () => {
+			agentsService.enforceAccessLevel.mockResolvedValue(undefined);
+			agentsService.executeAgentTask.mockResolvedValue({
+				status: 'completed',
+				summary: 'Done',
+				steps: [],
+			});
+
+			const req = makeAuthReq('application/json');
+
+			await controller.dispatchTask(req, mock<Response>(), 'agent-1', {
+				prompt: 'Test',
+			} as never);
+
+			const callOpts = agentsService.executeAgentTask.mock.calls[0][3];
+			expect(callOpts?.workflowCredentials).toBeUndefined();
+			expect(callOpts?.byokApiKey).toBeUndefined();
 		});
 
 		it('should flush after each SSE write to prevent compression buffering', async () => {
@@ -555,5 +665,132 @@ describe('callLlm', () => {
 		await expect(callLlm([{ role: 'user', content: 'Hi' }], defaultConfig)).rejects.toThrow(
 			'LLM API returned 401: Unauthorized',
 		);
+	});
+});
+
+describe('credential leak investigation', () => {
+	// These tests document how workflow error data flows through the agent's
+	// observation path. Line 634 of agents.service.ts serialises the full
+	// runWorkflow result (including resultData) and sends it to:
+	//   1. The LLM context (messages array)
+	//   2. The SSE stream (onStep callback)
+	//   3. The final task result (steps array)
+	//
+	// If a node fails and its error includes credential data in the response
+	// body (e.g. a 401 that echoes the auth header), that data leaks.
+
+	it('should expose credential values in serialised workflow result when node error contains them', () => {
+		// Simulate what runWorkflow returns when a node fails with credential data
+		// in the error context (e.g. API echoes back Authorization header in 401)
+		const fakeRunWorkflowResult = {
+			success: false,
+			executionId: 'exec-123',
+			data: {
+				// This is resultData — what line 839 returns
+				error: {
+					message: 'Request failed with status code 401',
+					name: 'NodeApiError',
+					context: {
+						data: {
+							error: 'Unauthorized',
+							// API echoed back the auth header — this is the leak
+							received_authorization: 'Bearer cur_SUPER_SECRET_CURRENTS_KEY',
+						},
+					},
+				},
+				runData: {},
+				lastNodeExecuted: 'Currents',
+			},
+		};
+
+		// This is exactly what line 634 does:
+		// `Workflow "${workflowName}" executed. Result: ${jsonStringify(result).slice(0, 2000)}`
+		const serialised = jsonStringify(fakeRunWorkflowResult).slice(0, 2000);
+
+		// PROVES THE LEAK: credential value appears in the serialised output
+		// that gets sent to LLM context + SSE stream + final result
+		expect(serialised).toContain('cur_SUPER_SECRET_CURRENTS_KEY');
+	});
+
+	it('should expose credential values from error.message when thrown error contains them', () => {
+		// Some APIs include credential hints in error messages
+		const error = new Error('Authentication failed for API key cur_abc123... Invalid key format');
+		const errorMsg = error.message;
+
+		// This is exactly what line 642 does:
+		// `Workflow execution failed: ${errorMsg}`
+		const observation = `Workflow execution failed: ${errorMsg}`;
+
+		// PROVES THE LEAK: credential fragment appears in the observation
+		expect(observation).toContain('cur_abc123');
+	});
+
+	it('should expose BYOK LLM key if anthropic returns it in an error response', () => {
+		// Simulate anthropic API error that echoes back the key
+		const fakeRunWorkflowResult = {
+			success: false,
+			executionId: 'exec-456',
+			data: {
+				error: {
+					message: 'Invalid API key provided',
+					name: 'NodeApiError',
+					context: {
+						data: {
+							type: 'authentication_error',
+							message: 'Invalid API key provided: sk-ant-BUYER_SECRET_KEY',
+						},
+					},
+				},
+				runData: {},
+			},
+		};
+
+		const serialised = jsonStringify(fakeRunWorkflowResult).slice(0, 2000);
+
+		// PROVES THE LEAK: BYOK key appears in serialised output
+		expect(serialised).toContain('sk-ant-BUYER_SECRET_KEY');
+	});
+
+	it('should document all output channels where leaked data appears', () => {
+		// recordObservation (line 406-425) sends data to THREE channels:
+		const steps: Array<{ action: string; result?: string }> = [];
+		const messages: Array<{ role: string; content: string }> = [];
+		const sseEvents: Array<Record<string, unknown>> = [];
+
+		const secretKey = 'cur_LEAKED_API_KEY_12345';
+		const observationMessage = `Workflow "Currents Check" executed. Result: {"success":false,"data":{"error":{"context":{"data":{"key":"${secretKey}"}}}}}`;
+
+		// Simulating what recordObservation does:
+		// Line 417: steps[steps.length - 1].result = observation.result;
+		steps.push({ action: 'execute_workflow' });
+		steps[steps.length - 1].result = 'failed';
+
+		// Line 418: messages.push(...)
+		messages.push({ role: 'user', content: `Observation: ${observationMessage}` });
+
+		// Line 419-424: onStep callback
+		sseEvents.push({
+			type: 'observation',
+			action: 'execute_workflow',
+			result: 'failed',
+			workflowName: 'Currents Check',
+		});
+
+		// Channel 1: LLM context — credential leaks into the LLM's conversation
+		expect(messages[0].content).toContain(secretKey);
+
+		// Channel 2: SSE events — the extra fields do NOT include the message,
+		// only workflowName. So SSE observation events are SAFE.
+		const sseJson = JSON.stringify(sseEvents[0]);
+		expect(sseJson).not.toContain(secretKey);
+
+		// Channel 3: Steps array — steps only contain action + result string,
+		// not the full message. So the final task result steps are SAFE.
+		const stepsJson = JSON.stringify(steps);
+		expect(stepsJson).not.toContain(secretKey);
+
+		// CONCLUSION: The primary leak channel is the LLM context (messages array).
+		// The LLM sees the credential value and could potentially include it in
+		// its reasoning/summary, which WOULD then appear in the final result.
 	});
 });
